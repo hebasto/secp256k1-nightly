@@ -14,14 +14,13 @@
 
 - Invoke GNU Make as `gmake`.
 - Pin runner labels explicitly (e.g. `ubuntu-26.04`, `ubuntu-26.04-arm`) for jobs that build on the host. Jobs that run in a `container:` or boot a VM via vmactions use `ubuntu-latest`, since the host image does not affect the build.
-- Pass `HOST=` to depends only when cross-compiling.
-- Nightly workflows chain on `Manager` via `workflow_run` and report to CDash. `clang.yml` is a convenient starting point for a new workflow, but layout may differ per platform; what every CDash job must satisfy is:
-  - it builds `bitcoin/bitcoin` master, or a PR merge ref while a platform fix is pending upstream, and reports the underlying master commit to CDash via `ctest_update()`;
+- Nightly workflows chain on `Manager` via `workflow_run` and report to CDash. `openbsd.yml` is a convenient starting point for a new workflow, but layout may differ per platform; what every CDash job must satisfy is:
+  - it builds `bitcoin-core/secp256k1` master, or a PR merge ref while a platform fix is pending upstream, and reports the underlying master commit to CDash via `ctest_update()`; the commit ID is read from the pax global header of the source tarball, as the source tree does not record it;
+  - it sets `CTEST_SUBMIT_URL` to `https://cdash.fish.foo/submit.php?project=secp256k1` and `CTEST_NIGHTLY_START_TIME` to `00:00:00 UTC` in its CTest script, as the source tree ships no `CTestConfig.cmake`;
   - its `ctest_update()` uses the shared form, `set(CTEST_UPDATE_COMMAND not-run/git)` plus `CTEST_UPDATE_VERSION_OVERRIDE`, never `CTEST_GIT_COMMAND` or `CTEST_UPDATE_VERSION_ONLY`: a real git would list local modifications and report a patched tree as an update error;
   - it starts the `Nightly` group only when chained from `Manager`, and `Experimental` otherwise;
   - configure, build, and test failures each fail the job (`ctest_test()` needs the `RETURN_VALUE` check);
   - the submit step runs with `if: always()`;
-  - unit tests get `DIR_UNIT_TEST_DATA` pointing at `script_assets_test.json` from bitcoin-core/qa-assets;
-  - the job name and `CTEST_BUILD_NAME` are identical and name disabled features (`no GUI`, `no IPC`, `no ZMQ`).
-- `README.md` mirrors the workflows: the releases column lists the matrix entries, the notes column names what a job does not build or test (`No GUI`, `USDT - N/A`), and toolchain versions appear where the notes pin them. A change to any of those in a workflow updates the matching README row in the same commit; dropping a feature from a job name or `CTEST_BUILD_NAME` drops it from the README too.
+  - the job name and `CTEST_BUILD_NAME` are identical and name every matrix dimension (release, `static` or `shared`) and any disabled module or feature.
+- `README.md` mirrors the workflows: the releases column lists the matrix entries, the notes column names what a job covers beyond the defaults or does not build or test, and toolchain versions appear where the notes pin them. A change to any of those in a workflow updates the matching README row in the same commit; dropping a feature from a job name or `CTEST_BUILD_NAME` drops it from the README too.
 - Attach the compiler's `-v` output as a CDash note (`CTEST_NOTES_FILES`) only where the toolchain is not fixed by the build name: compiler snapshots, rolling releases, and compilers from third-party package repositories. For pinned OS releases, CMake's compiler identification in the configure output is enough.
