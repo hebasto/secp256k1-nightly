@@ -1,0 +1,161 @@
+name: OpenBSD
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/openbsd.yml'
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository name with owner'
+        required: true
+        default: bitcoin-core/secp256k1
+        type: string
+      ref:
+        description: 'Repository reference: refs/heads/<branch>, refs/tags/<tag>, refs/pull/<PR>/head or <commit>'
+        required: true
+        default: refs/heads/master
+        type: string
+  workflow_run:
+    workflows: ["Manager"]
+    types: [requested]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}${{ github.event_name != 'pull_request' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openbsd:
+    name: 'OpenBSD ${{ matrix.release }}, ${{ matrix.lib }}'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: openbsd {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Test all supported releases.
+        # From https://www.openbsd.org/faq/faq5.html:
+        # > Only the two most recent OpenBSD releases receive
+        # > security and reliability fixes for the base system.
+        release: ['7.9', '8.0']
+        lib: [static, shared]
+
+    steps:
+      - name: Annotate with workflow inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUTS_REPOSITORY: ${{ inputs.repository }}
+          INPUTS_REF: ${{ inputs.ref }}
+        shell: bash
+        run: echo "::notice title=inputs::$INPUTS_REPOSITORY $INPUTS_REF"
+
+      - name: Start OpenBSD ${{ matrix.release }} VM
+        uses: vmactions/openbsd-vm@v1
+        with:
+          release: ${{ matrix.release }}
+          prepare: pkg_add -U -v curl gtar-- cmake-core ninja
+          sync: no
+          disable-cache: true
+
+      - name: Fetch source tarball
+        run: |
+          set -e
+          curl --location --fail --retry 5 --retry-delay 30 --retry-all-errors --output source.tar.gz https://github.com/${{ inputs.repository || 'bitcoin-core/secp256k1' }}/archive/${{ inputs.ref || 'refs/heads/master' }}.tar.gz
+          # `git archive` stores the commit ID in the pax global header,
+          # which occupies the first two 512-byte blocks of the tarball.
+          COMMIT="$(gzip -dc source.tar.gz | dd bs=512 count=2 2>/dev/null | tr -c '[:print:]' '\n' | sed -n 's/^.*comment=\([0-9a-f]\{40\}\)$/\1/p')"
+          test -n "$COMMIT"
+          echo "set(CTEST_UPDATE_VERSION_OVERRIDE $COMMIT)" > ctest_update_version_override.cmake
+          mkdir /home/secp256k1
+          gtar -xf source.tar.gz -C /home/secp256k1 --strip-components=1
+          rm -rf source.tar.gz
+
+      - name: Generate CTest configuration
+        run: |
+          cat << 'EOF' > ctest_config.cmake
+          set(CTEST_SITE "${{ github.repository }}")
+          set(CTEST_BUILD_NAME "OpenBSD ${{ matrix.release }}, ${{ matrix.lib }}")
+          set(CTEST_SOURCE_DIRECTORY "/home/secp256k1")
+          set(CTEST_BINARY_DIRECTORY "/home/build")
+          set(CTEST_CMAKE_GENERATOR "Ninja")
+          # The source tree ships no CTestConfig.cmake.
+          set(CTEST_SUBMIT_URL "https://cdash.fish.foo/submit.php?project=secp256k1")
+          set(CTEST_NIGHTLY_START_TIME "00:00:00 UTC")
+          cmake_host_system_information(RESULT nproc QUERY NUMBER_OF_LOGICAL_CORES)
+          EOF
+
+      - name: CDash -- Start & Update
+        run: |
+          cat << 'EOF' > ctest_start_update.cmake
+          include(ctest_config.cmake)
+          ctest_start(${{ case(github.event_name == 'workflow_run', 'Nightly', format('Experimental GROUP {0}', github.event_name)) }})
+          # CTest infers the VCS type from the update command's name. With
+          # CTEST_UPDATE_VERSION_OVERRIDE set no update runs, but CTest still
+          # invokes the command to list local modifications and reports any as
+          # an update error. The command deliberately does not exist, so that
+          # check is skipped on every runner, whether or not git is installed
+          # and whether or not the tree has been patched.
+          set(CTEST_UPDATE_COMMAND not-run/git)
+          include(ctest_update_version_override.cmake)
+          ctest_update()
+          EOF
+          ctest --script ctest_start_update.cmake
+
+      - name: CDash -- Configure
+        run: |
+          cat << 'EOF' > ctest_configure.cmake
+          include(ctest_config.cmake)
+          set(configure_opts
+            "--preset dev-mode"
+            "-DBUILD_SHARED_LIBS=${{ matrix.lib == 'shared' && 'ON' || 'OFF' }}"
+            "-DCMAKE_COMPILE_WARNING_AS_ERROR=ON"
+          )
+          ctest_start(APPEND)
+          ctest_configure(OPTIONS "${configure_opts}")
+          EOF
+          ctest --extra-verbose --script ctest_configure.cmake
+
+      - name: CDash -- Build
+        run: |
+          cat << 'EOF' > ctest_build.cmake
+          include(ctest_config.cmake)
+          ctest_start(APPEND)
+          ctest_build(PARALLEL_LEVEL ${nproc})
+          EOF
+          ctest --extra-verbose --script ctest_build.cmake
+
+      - name: Check library and 'bench' executable
+        run: |
+          set -e
+          ls -l /home/build/lib
+          file /home/build/lib/libsecp256k1.*
+          file /home/build/bin/bench
+          ldd /home/build/bin/bench
+
+      - name: CDash -- Test
+        run: |
+          cat << 'EOF' > ctest_test.cmake
+          include(ctest_config.cmake)
+          ctest_start(APPEND)
+          ctest_test(
+            PARALLEL_LEVEL ${nproc}
+            RETURN_VALUE test_result
+          )
+          # ctest_test() does not fail the script when tests fail.
+          # The only signal is RETURN_VALUE (0 == all tests passed).
+          if(NOT test_result EQUAL 0)
+            message(FATAL_ERROR "Tests failed: RETURN_VALUE=${test_result}")
+          endif()
+          EOF
+          ctest --script ctest_test.cmake
+
+      - name: CDash -- Submit
+        if: always()
+        run: |
+          cat << 'EOF' > ctest_submit.cmake
+          include(ctest_config.cmake)
+          ctest_start(APPEND)
+          ctest_submit()
+          EOF
+          ctest --script ctest_submit.cmake
