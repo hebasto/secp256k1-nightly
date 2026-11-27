@@ -1,0 +1,180 @@
+name: ARM32
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/arm32.yml'
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository name with owner'
+        required: true
+        default: bitcoin-core/secp256k1
+        type: string
+      ref:
+        description: 'Repository reference: refs/heads/<branch>, refs/tags/<tag>, refs/pull/<PR>/head or <commit>'
+        required: true
+        default: refs/heads/master
+        type: string
+  workflow_run:
+    workflows: ["Manager"]
+    types: [requested]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}${{ github.event_name != 'pull_request' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm32:
+    # Upstream CI builds this target with Autotools only. This job covers the
+    # CMake build system instead: the toolchain file shipped in the source
+    # tree, the ARM assembly, and tests run via CMAKE_CROSSCOMPILING_EMULATOR.
+    name: 'ARM32, CMake nightly, qemu-user, ${{ matrix.asm.name }}'
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        asm:
+          - name: 'no asm'
+            value: 'OFF'
+          - name: 'arm32 asm'
+            value: 'arm32'
+    env:
+      # Tells qemu-arm where the armhf dynamic loader and shared libraries
+      # live.
+      QEMU_LD_PREFIX: /usr/arm-linux-gnueabihf
+      # The tests run under emulation; the value mirrors the "ARM32" job in
+      # bitcoin-core/secp256k1's CI.
+      SECP256K1_TEST_ITERS: 16
+
+    steps:
+      - name: Annotate with workflow inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUTS_REPOSITORY: ${{ inputs.repository }}
+          INPUTS_REF: ${{ inputs.ref }}
+        run: echo "::notice title=inputs::$INPUTS_REPOSITORY $INPUTS_REF"
+
+      - name: Install dependencies
+        # qemu-user does not register a binfmt_misc handler, so the ARM
+        # binaries run only through CMAKE_CROSSCOMPILING_EMULATOR.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user ninja-build
+
+      - name: Toolchain versions
+        run: |
+          arm-linux-gnueabihf-gcc --version
+          qemu-arm --version
+          ninja --version
+
+      - name: Fetch source tarball
+        run: |
+          curl --location --fail --retry 5 --retry-delay 30 --retry-all-errors --output source.tar.gz https://github.com/${{ inputs.repository || 'bitcoin-core/secp256k1' }}/archive/${{ inputs.ref || 'refs/heads/master' }}.tar.gz
+          # `git archive` stores the commit ID in the pax global header,
+          # which occupies the first two 512-byte blocks of the tarball.
+          COMMIT="$(gzip -dc source.tar.gz | dd bs=512 count=2 2>/dev/null | tr -c '[:print:]' '\n' | sed -n 's/^.*comment=\([0-9a-f]\{40\}\)$/\1/p')"
+          test -n "$COMMIT"
+          echo "set(CTEST_UPDATE_VERSION_OVERRIDE $COMMIT)" > ctest_update_version_override.cmake
+          mkdir secp256k1
+          tar -xzf source.tar.gz -C secp256k1 --strip-components=1
+          rm source.tar.gz
+
+      - name: Install CMake nightly build
+        run: |
+          base="https://cmake.org/files/dev"
+          # The directory keeps about a year of builds and has no "latest"
+          # alias. In `cmake-<major>.<minor>.<YYYYMMDD>-g<hash>-...` the third
+          # dot-separated field starts with the build date.
+          tarball="$(curl --fail --silent --show-error --location --retry 5 --retry-delay 30 --retry-all-errors "${base}/" \
+            | grep -o 'href="cmake-[^"]*-linux-x86_64\.tar\.gz"' | cut -d '"' -f 2 | sort -t . -k 3 | tail -1)"
+          [ -n "${tarball}" ]
+          curl --fail --silent --show-error --location --retry 5 --retry-delay 30 --retry-all-errors --output "${RUNNER_TEMP}/${tarball}" "${base}/${tarball}"
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}"
+          # Takes precedence over the CMake that the runner image provides.
+          echo "${RUNNER_TEMP}/${tarball%.tar.gz}/bin" >> "$GITHUB_PATH"
+
+      - name: CMake version
+        run: |
+          command -v cmake ctest
+          cmake --version | tee cmake_version.txt
+
+      - name: Generate CTest configuration
+        run: |
+          cat << 'EOF' > ctest_config.cmake
+          set(CTEST_SITE "${{ github.repository }}")
+          set(CTEST_BUILD_NAME "ARM32, CMake nightly, qemu-user, ${{ matrix.asm.name }}")
+          set(CTEST_SOURCE_DIRECTORY "$ENV{GITHUB_WORKSPACE}/secp256k1")
+          set(CTEST_BINARY_DIRECTORY "$ENV{GITHUB_WORKSPACE}/build")
+          set(CTEST_CMAKE_GENERATOR "Ninja")
+          # The source tree ships no CTestConfig.cmake.
+          set(CTEST_SUBMIT_URL "https://cdash.fish.foo/submit.php?project=secp256k1")
+          set(CTEST_NIGHTLY_START_TIME "00:00:00 UTC")
+          cmake_host_system_information(RESULT nproc QUERY NUMBER_OF_LOGICAL_CORES)
+          EOF
+
+      - name: CDash -- Start & Update
+        shell: ctest --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(${{ case(github.event_name == 'workflow_run', 'Nightly', format('Experimental GROUP {0}', github.event_name)) }})
+          # CTest infers the VCS type from the update command's name. With
+          # CTEST_UPDATE_VERSION_OVERRIDE set no update runs, but CTest still
+          # invokes the command to list local modifications and reports any as
+          # an update error. The command deliberately does not exist, so that
+          # check is skipped on every runner, whether or not git is installed
+          # and whether or not the tree has been patched.
+          set(CTEST_UPDATE_COMMAND not-run/git)
+          include("$ENV{GITHUB_WORKSPACE}/ctest_update_version_override.cmake")
+          ctest_update()
+
+      - name: CDash -- Configure
+        shell: ctest --extra-verbose --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          set(configure_opts
+            "--preset dev-mode"
+            "--toolchain ${CTEST_SOURCE_DIRECTORY}/cmake/arm-linux-gnueabihf.toolchain.cmake"
+            "-DCMAKE_CROSSCOMPILING_EMULATOR=qemu-arm"
+            "-DSECP256K1_ASM=${{ matrix.asm.value }}"
+            "-DCMAKE_COMPILE_WARNING_AS_ERROR=ON"
+          )
+          ctest_start(APPEND)
+          ctest_configure(OPTIONS "${configure_opts}")
+
+      - name: CDash -- Build
+        shell: ctest --extra-verbose --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(APPEND)
+          ctest_build(PARALLEL_LEVEL ${nproc})
+
+      - name: Check library and 'tests' executable
+        run: |
+          ls -l build/lib
+          file build/lib/libsecp256k1.so.*.*
+          file build/bin/tests
+
+      - name: CDash -- Test
+        shell: ctest --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(APPEND)
+          ctest_test(
+            PARALLEL_LEVEL ${nproc}
+            RETURN_VALUE test_result
+          )
+          # ctest_test() does not fail the script when tests fail.
+          # The only signal is RETURN_VALUE (0 == all tests passed).
+          if(NOT test_result EQUAL 0)
+            message(FATAL_ERROR "Tests failed: RETURN_VALUE=${test_result}")
+          endif()
+
+      - name: CDash -- Submit
+        if: always()
+        shell: ctest --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(APPEND)
+          set(CTEST_NOTES_FILES "$ENV{GITHUB_WORKSPACE}/cmake_version.txt")
+          ctest_submit()
