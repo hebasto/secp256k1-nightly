@@ -17,3 +17,9 @@ Built with a [CMake nightly build](https://cmake.org/files/dev/) and the [`arm-l
 | Host OS | Toolchain | Status | Notes |
 |---------|-----------|--------|-------|
 | Ubuntu 26.04, x86_64 | GCC, [`gcc-arm-linux-gnueabihf`](https://packages.ubuntu.com/gcc-arm-linux-gnueabihf) | [![ARM32](https://github.com/hebasto/secp256k1-nightly/actions/workflows/arm32.yml/badge.svg?event=workflow_run)](https://github.com/hebasto/secp256k1-nightly/actions/workflows/arm32.yml?query=event%3Aworkflow_run) | With and without ARM assembly <br> Tests run under [QEMU](https://www.qemu.org/) user-mode emulation |
+
+## [musl](https://musl.libc.org/)-Based Systems
+
+| Operating System | Status | Notes |
+|------------------|--------|-------|
+| [Alpine Linux](https://alpinelinux.org) | [![Alpine](https://github.com/hebasto/secp256k1-nightly/actions/workflows/alpine.yml/badge.svg?event=workflow_run)](https://github.com/hebasto/secp256k1-nightly/actions/workflows/alpine.yml?query=event%3Aworkflow_run) | Constant-time tests under [Valgrind](https://valgrind.org/) |
