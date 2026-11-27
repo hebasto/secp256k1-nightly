@@ -1,0 +1,13 @@
+name: Manager
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/manager.yml'
+  # Meant to be dispatched daily by an external scheduler, as GitHub's own
+  # `schedule` event is unreliable.
+  workflow_dispatch:
+jobs:
+  manager:
+    runs-on: ubuntu-slim
+    steps:
+      - run: /usr/bin/true
