@@ -23,3 +23,11 @@ Built with a [CMake nightly build](https://cmake.org/files/dev/) and the [`arm-l
 | Operating System | Status | Notes |
 |------------------|--------|-------|
 | [Alpine Linux](https://alpinelinux.org) | [![Alpine](https://github.com/hebasto/secp256k1-nightly/actions/workflows/alpine.yml/badge.svg?event=workflow_run)](https://github.com/hebasto/secp256k1-nightly/actions/workflows/alpine.yml?query=event%3Aworkflow_run) | Constant-time tests under [Valgrind](https://valgrind.org/) |
+
+## Minimum Recommended Toolchain
+
+A port of [bitcoin-core/secp256k1#1874](https://github.com/bitcoin-core/secp256k1/pull/1874).
+
+| Operating System | Toolchain | Status | Notes |
+|------------------|-----------|--------|-------|
+| [Debian](https://www.debian.org/) oldoldstable | GCC (default), [CMake 3.22.6](https://github.com/Kitware/CMake/releases/tag/v3.22.6) | [![Debian oldoldstable](https://github.com/hebasto/secp256k1-nightly/actions/workflows/debian-oldoldstable.yml/badge.svg?event=workflow_run)](https://github.com/hebasto/secp256k1-nightly/actions/workflows/debian-oldoldstable.yml?query=event%3Aworkflow_run) | Minimum required CMake version |

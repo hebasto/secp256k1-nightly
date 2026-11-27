@@ -1,0 +1,174 @@
+name: Debian oldoldstable
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/debian-oldoldstable.yml'
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository name with owner'
+        required: true
+        default: bitcoin-core/secp256k1
+        type: string
+      ref:
+        description: 'Repository reference: refs/heads/<branch>, refs/tags/<tag>, refs/pull/<PR>/head or <commit>'
+        required: true
+        default: refs/heads/master
+        type: string
+  workflow_run:
+    workflows: ["Manager"]
+    types: [requested]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}${{ github.event_name != 'pull_request' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debian-oldoldstable:
+    # A port of https://github.com/bitcoin-core/secp256k1/pull/1874, which
+    # documents the default toolchain of Debian "oldoldstable" as the minimum
+    # recommended one. That release ships a CMake older than the minimum
+    # required version, so the latter is installed from upstream binaries.
+    name: 'Debian oldoldstable, CMake ${{ matrix.cmake }}'
+    runs-on: ubuntu-latest
+    container: debian:oldoldstable-slim
+    strategy:
+      matrix:
+        # The latest patch release of the minimum CMake version required by
+        # the source tree's `cmake_minimum_required()`.
+        cmake: ['3.22.6']
+    env:
+      CMAKE_VERSION: ${{ matrix.cmake }}
+
+    steps:
+      - name: Annotate with workflow inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUTS_REPOSITORY: ${{ inputs.repository }}
+          INPUTS_REF: ${{ inputs.ref }}
+        run: echo "::notice title=inputs::$INPUTS_REPOSITORY $INPUTS_REF"
+
+      - name: Install dependencies
+        run: |
+          # Once a release reaches its end of life, its security updates move
+          # to archive.debian.org, where suites go by codename only, while
+          # deb.debian.org keeps serving an index of packages it no longer
+          # has.
+          . /etc/os-release
+          if /usr/lib/apt/apt-helper download-file "http://archive.debian.org/debian-security/dists/${VERSION_CODENAME}-security/InRelease" /tmp/InRelease; then
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+              if [ -f "$f" ]; then
+                sed -i -e "s|deb.debian.org/debian-security|archive.debian.org/debian-security|" -e "s|oldoldstable-security|${VERSION_CODENAME}-security|" "$f"
+                cat "$f"
+              fi
+            done
+          fi
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates curl file gcc libc6-dev make
+
+      - name: Install CMake ${{ matrix.cmake }}
+        run: |
+          curl --location --fail --retry 5 --retry-delay 30 --retry-all-errors --output cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz
+          mkdir /opt/cmake
+          tar -xzf cmake.tar.gz -C /opt/cmake --strip-components=1
+          rm cmake.tar.gz
+          echo "/opt/cmake/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          cat /etc/os-release
+          gcc --version
+          ldd --version
+          cmake --version
+
+      - name: Fetch source tarball
+        run: |
+          curl --location --fail --retry 5 --retry-delay 30 --retry-all-errors --output source.tar.gz https://github.com/${{ inputs.repository || 'bitcoin-core/secp256k1' }}/archive/${{ inputs.ref || 'refs/heads/master' }}.tar.gz
+          # `git archive` stores the commit ID in the pax global header,
+          # which occupies the first two 512-byte blocks of the tarball.
+          COMMIT="$(gzip -dc source.tar.gz | head -c 1024 | grep -a -o 'comment=[0-9a-f]\{40\}' | cut -d = -f 2)"
+          echo "Commit: $COMMIT"
+          test -n "$COMMIT"
+          echo "set(CTEST_UPDATE_VERSION_OVERRIDE $COMMIT)" > ctest_update_version_override.cmake
+          mkdir secp256k1
+          tar -xzf source.tar.gz -C secp256k1 --strip-components=1
+          rm source.tar.gz
+
+      - name: Generate CTest configuration
+        run: |
+          cat << 'EOF' > ctest_config.cmake
+          set(CTEST_SITE "${{ github.repository }}")
+          set(CTEST_BUILD_NAME "Debian oldoldstable, CMake ${{ matrix.cmake }}")
+          set(CTEST_SOURCE_DIRECTORY "$ENV{GITHUB_WORKSPACE}/secp256k1")
+          set(CTEST_BINARY_DIRECTORY "$ENV{GITHUB_WORKSPACE}/build")
+          set(CTEST_CMAKE_GENERATOR "Unix Makefiles")
+          # The source tree ships no CTestConfig.cmake.
+          set(CTEST_SUBMIT_URL "https://cdash.fish.foo/submit.php?project=secp256k1")
+          set(CTEST_NIGHTLY_START_TIME "00:00:00 UTC")
+          cmake_host_system_information(RESULT nproc QUERY NUMBER_OF_LOGICAL_CORES)
+          EOF
+
+      - name: CDash -- Start & Update
+        shell: ctest --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(${{ case(github.event_name == 'workflow_run', 'Nightly', format('Experimental GROUP {0}', github.event_name)) }})
+          # CTest infers the VCS type from the update command's name. With
+          # CTEST_UPDATE_VERSION_OVERRIDE set no update runs, but CTest still
+          # invokes the command to list local modifications and reports any as
+          # an update error. The command deliberately does not exist, so that
+          # check is skipped on every runner, whether or not git is installed
+          # and whether or not the tree has been patched.
+          set(CTEST_UPDATE_COMMAND not-run/git)
+          include("$ENV{GITHUB_WORKSPACE}/ctest_update_version_override.cmake")
+          ctest_update()
+
+      - name: CDash -- Configure
+        shell: ctest --extra-verbose --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          set(configure_opts
+            "--preset dev-mode"
+            # CMAKE_COMPILE_WARNING_AS_ERROR requires CMake 3.24.
+            "-DCMAKE_C_FLAGS=-Werror"
+          )
+          ctest_start(APPEND)
+          ctest_configure(OPTIONS "${configure_opts}")
+
+      - name: CDash -- Build
+        shell: ctest --extra-verbose --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(APPEND)
+          ctest_build(PARALLEL_LEVEL ${nproc})
+
+      - name: Check library and 'bench' executable
+        run: |
+          ls -l build/lib
+          file build/lib/libsecp256k1.so.*.*
+          file build/bin/bench
+          ldd build/bin/bench
+
+      - name: CDash -- Test
+        shell: ctest --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(APPEND)
+          ctest_test(
+            PARALLEL_LEVEL ${nproc}
+            RETURN_VALUE test_result
+          )
+          # ctest_test() does not fail the script when tests fail.
+          # The only signal is RETURN_VALUE (0 == all tests passed).
+          if(NOT test_result EQUAL 0)
+            message(FATAL_ERROR "Tests failed: RETURN_VALUE=${test_result}")
+          endif()
+
+      - name: CDash -- Submit
+        if: always()
+        shell: ctest --script {0}
+        run: |
+          include("$ENV{GITHUB_WORKSPACE}/ctest_config.cmake")
+          ctest_start(APPEND)
+          ctest_submit()
